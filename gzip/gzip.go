@@ -5,10 +5,12 @@
 package gzip
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"sync"
 
 	"github.com/klauspost/compress/flate"
 )
@@ -109,7 +111,7 @@ func (z *Writer) init(w io.Writer, level int) {
 		},
 		w:          w,
 		level:      level,
-		compressor: compressor,
+		compressor: compressor, // 在哪儿分配的 ?
 	}
 }
 
@@ -166,6 +168,55 @@ func (z *Writer) writeString(s string) (err error) {
 	return err
 }
 
+func (z *Writer) WriteHeader() (int, error) {
+	z.buf[0] = gzipID1
+	z.buf[1] = gzipID2
+	z.buf[2] = gzipDeflate
+	z.buf[3] = 0
+	if z.Extra != nil {
+		z.buf[3] |= 0x04
+	}
+	if z.Name != "" {
+		z.buf[3] |= 0x08
+	}
+	if z.Comment != "" {
+		z.buf[3] |= 0x10
+	}
+	le.PutUint32(z.buf[4:8], uint32(z.ModTime.Unix()))
+	if z.level == BestCompression {
+		z.buf[8] = 2
+	} else if z.level == BestSpeed {
+		z.buf[8] = 4
+	} else {
+		z.buf[8] = 0
+	}
+	z.buf[9] = z.OS
+	var n int
+	n, z.err = z.w.Write(z.buf[:10])
+	if z.err != nil {
+		return n, z.err
+	}
+	if z.Extra != nil {
+		z.err = z.writeBytes(z.Extra)
+		if z.err != nil {
+			return n, z.err
+		}
+	}
+	if z.Name != "" {
+		z.err = z.writeString(z.Name)
+		if z.err != nil {
+			return n, z.err
+		}
+	}
+	if z.Comment != "" {
+		z.err = z.writeString(z.Comment)
+		if z.err != nil {
+			return n, z.err
+		}
+	}
+	return 0, nil
+}
+
 // Write writes a compressed form of p to the underlying io.Writer. The
 // compressed bytes are not necessarily flushed until the Writer is closed.
 func (z *Writer) Write(p []byte) (int, error) {
@@ -176,51 +227,10 @@ func (z *Writer) Write(p []byte) (int, error) {
 	// Write the GZIP header lazily.
 	if !z.wroteHeader {
 		z.wroteHeader = true
-		z.buf[0] = gzipID1
-		z.buf[1] = gzipID2
-		z.buf[2] = gzipDeflate
-		z.buf[3] = 0
-		if z.Extra != nil {
-			z.buf[3] |= 0x04
-		}
-		if z.Name != "" {
-			z.buf[3] |= 0x08
-		}
-		if z.Comment != "" {
-			z.buf[3] |= 0x10
-		}
-		le.PutUint32(z.buf[4:8], uint32(z.ModTime.Unix()))
-		if z.level == BestCompression {
-			z.buf[8] = 2
-		} else if z.level == BestSpeed {
-			z.buf[8] = 4
-		} else {
-			z.buf[8] = 0
-		}
-		z.buf[9] = z.OS
-		n, z.err = z.w.Write(z.buf[:10])
+		n, z.err = z.WriteHeader()
 		if z.err != nil {
 			return n, z.err
 		}
-		if z.Extra != nil {
-			z.err = z.writeBytes(z.Extra)
-			if z.err != nil {
-				return n, z.err
-			}
-		}
-		if z.Name != "" {
-			z.err = z.writeString(z.Name)
-			if z.err != nil {
-				return n, z.err
-			}
-		}
-		if z.Comment != "" {
-			z.err = z.writeString(z.Comment)
-			if z.err != nil {
-				return n, z.err
-			}
-		}
-
 		if z.compressor == nil && z.level != StatelessCompression {
 			z.compressor, _ = flate.NewWriter(z.w, z.level)
 		}
@@ -289,7 +299,12 @@ func (z *Writer) Close() error {
 	return z.err
 }
 
-func (z *Writer) WriteGzipedData(raw []byte, gziped []byte) (int, error) {
+// Digest() use for test
+func (z *Writer) Digest() uint32 {
+	return z.digest
+}
+
+func (z *Writer) WriteGzipedData(raw []byte, gziped []byte, digest uint32) (int, error) {
 	if !z.wroteHeader {
 		z.Write(nil)
 		if z.err != nil {
@@ -297,6 +312,61 @@ func (z *Writer) WriteGzipedData(raw []byte, gziped []byte) (int, error) {
 		}
 	}
 	z.size += uint32(len(raw))
-	z.digest = crc32.Update(z.digest, crc32.IEEETable, raw)
+	if digest > 0 {
+		z.digest = digest
+	} else {
+		z.digest = crc32.Update(z.digest, crc32.IEEETable, raw)
+	}
 	return z.w.Write(gziped)
+}
+
+var writerpool = sync.Pool{
+	New: func() any {
+		out, _ := NewWriterLevel(bytes.NewBuffer(make([]byte, 32)), BestSpeed)
+		out.Write(nil)
+		out.Flush()
+		return out
+	},
+}
+
+func GetWriter(target io.Writer) *Writer {
+	w, _ := writerpool.Get().(*Writer)
+	w.Header = Header{
+		OS: 255, // unknown
+	}
+	w.w = target
+	w.size = 0
+	w.digest = 0
+	w.wroteHeader = true
+	w.closed = false
+	w.err = nil
+	w.compressor.Reset(target)
+	return w
+}
+
+func PutWriter(z *Writer) {
+	z.Flush()
+	z.err = z.compressor.Close()
+	le.PutUint32(z.buf[:4], z.digest)
+	le.PutUint32(z.buf[4:8], z.size)
+	_, z.err = z.w.Write(z.buf[:8])
+	z.w = nil
+	writerpool.Put(z)
+}
+
+// GetGzipedData
+func GetGzipedData(b []byte) ([]byte, uint32) {
+	buf := &bytes.Buffer{}
+	buf.Grow(len(b))
+	w, _ := NewWriterLevel(buf, BestSpeed)
+	w.Write(nil)
+	w.Flush()
+	headLen := buf.Len()
+	w.Write(b)
+	w.Flush()
+	out := make([]byte, buf.Len()-headLen)
+	copy(out, buf.Bytes()[headLen:])
+	digest := w.digest
+	w.Close()
+	return out, digest
 }
