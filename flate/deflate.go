@@ -848,7 +848,7 @@ func (d *compressor) init(w io.Writer, level int) (err error) {
 }
 
 // reset the state of the compressor.
-func (d *compressor) reset(w io.Writer) {
+func (d *compressor) reset(w io.Writer) {  // 这个占了 53% 的  cpu
 	d.w.reset(w)
 	d.sync = false
 	d.err = nil

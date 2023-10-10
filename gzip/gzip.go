@@ -288,3 +288,15 @@ func (z *Writer) Close() error {
 	_, z.err = z.w.Write(z.buf[:8])
 	return z.err
 }
+
+func (z *Writer) WriteGzipedData(raw []byte, gziped []byte) (int, error) {
+	if !z.wroteHeader {
+		z.Write(nil)
+		if z.err != nil {
+			return -1, z.err
+		}
+	}
+	z.size += uint32(len(raw))
+	z.digest = crc32.Update(z.digest, crc32.IEEETable, raw)
+	return z.w.Write(gziped)
+}
