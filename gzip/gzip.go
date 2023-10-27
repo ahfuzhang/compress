@@ -304,6 +304,10 @@ func (z *Writer) Digest() uint32 {
 	return z.digest
 }
 
+func (z *Writer) SetDigest(d uint32) {
+	z.digest = d
+}
+
 func (z *Writer) WriteGzipedData(raw []byte, gziped []byte, digest uint32) (int, error) {
 	if !z.wroteHeader {
 		z.Write(nil)
