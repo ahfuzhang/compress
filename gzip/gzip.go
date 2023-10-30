@@ -308,6 +308,15 @@ func (z *Writer) SetDigest(d uint32) {
 	z.digest = d
 }
 
+// Digest() use for test
+func (z *Writer) Size() uint32 {
+	return z.size
+}
+
+func (z *Writer) SetSize(s uint32) {
+	z.size = s
+}
+
 func (z *Writer) WriteGzipedData(raw []byte, gziped []byte, digest uint32) (int, error) {
 	if !z.wroteHeader {
 		z.Write(nil)
